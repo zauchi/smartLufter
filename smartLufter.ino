@@ -17,10 +17,12 @@ const int MAX_US = 2000;
 
 // ---------- Testprofil ----------
 const uint8_t  START_PCT = 10;
-const uint8_t  STOP_PCT  = 60;
+const uint8_t  STOP_PCT  = 90;
 const uint8_t  STEP_PCT  = 10;
-const uint32_t STEP_INTERVAL_MS = 5000;
+const uint32_t STEP_INTERVAL_MS = 3000;
 const uint32_t ARMING_MS = 5000;
+
+bool fanAllowed;
 
 // ---------- INA226 ----------
 INA226 ina(0x40);  // 0x40 laut Scan
@@ -36,15 +38,16 @@ int percentToUs(int pct){
   if (pct < 0) pct = 0; if (pct > 100) pct = 100;
   return MIN_US + (int)((MAX_US - MIN_US) * (pct / 100.0f));
 }
+
 uint32_t usToDuty(int us){
   float d = (us / PERIOD_US) * DUTY_MAX;
   if (d < 0) d = 0; if (d > DUTY_MAX) d = DUTY_MAX;
   return (uint32_t)(d + 0.5f);
 }
+
 void writePercent(int pct){
   ledcWrite(ESC_PIN, usToDuty(percentToUs(pct))); // ESP32 Core v3: pin-basiert
 }
-
 
 float readPackVoltage(){
   return ina.isConnected() ? ina.getBusVoltage() : NAN; // Volt
@@ -104,12 +107,39 @@ void drawBatteryWithPct(int x, int y, int w, int h, int soc) {
   u8g2.setDrawColor(1);
 }
 
+void drawFan(int cx, int cy, int r, int angleDeg) {
+  // Gehäuse
+  u8g2.drawCircle(cx, cy, r, U8G2_DRAW_ALL);
 
-// Hauptanzeige
+  // 3 Flügel
+  for (int i = 0; i < 3; i++) {
+    float ang = (angleDeg + i*120) * PI / 180.0;
+    int x2 = cx + cos(ang) * (r-2);
+    int y2 = cy + sin(ang) * (r-2);
+    u8g2.drawLine(cx, cy, x2, y2);
+  }
+}
+
 void drawUI(int pct, float v) {
   u8g2.clearBuffer();
 
-  // Großer Wert (Gas)
+  // --- Low Battery Alarm ---
+if (!isnan(v) && v <= 7.5f) {
+  u8g2.clearBuffer();
+  u8g2.setDrawColor(1);
+  u8g2.drawBox(0, 0, 128, 64);  // weißer Hintergrund
+  u8g2.setFont(u8g2_font_7x13_tf);
+  const char *msg = "LOW BATTERY!";
+  uint16_t w = u8g2.getStrWidth(msg);
+  u8g2.setDrawColor(0);  // schwarz
+  u8g2.drawStr((128 - w)/2, 36, msg);
+  u8g2.sendBuffer();
+
+  return;
+}
+
+  // --- Normale Anzeige ---
+  // Großer Gaswert
   char pctStr[8];
   snprintf(pctStr, sizeof(pctStr), "%d%%", pct);
   u8g2.setFont(u8g2_font_logisoso24_tf);
@@ -124,22 +154,16 @@ void drawUI(int pct, float v) {
   u8g2.setFont(u8g2_font_7x13_tf);
   u8g2.drawStr(0, 63, line);
 
-  // Batterie rechts unten
+  // Batterie rechts unten mit Prozent
   drawBatteryWithPct(90, 50, 36, 14, soc);
 
-  // Low-Batt-Warnung
-  if (!isnan(v) && v <= 7.5f) {
-    if ((millis()/500) % 2 == 0) { // blinkt alle 0.5s
-      u8g2.setFont(u8g2_font_7x13B_tf);
-      u8g2.drawStr(20, 20, "LOW BAT!");
-    }
-  }
+  // Lüfter animiert oben rechts
+  static int fanAngle = 0;
+  fanAngle = (fanAngle + max(1, pct/5) * 2) % 360;
+  drawFan(115, 15, 10, fanAngle);
 
   u8g2.sendBuffer();
 }
-
-
-
 
 void setup(){
   Serial.begin(115200);
@@ -174,32 +198,59 @@ void setup(){
   // Arming
   writePercent(0);
   float v = readPackVoltage();
-  drawUI(0, v);
-  Serial.println("Arming...");
-  delay(ARMING_MS);
-  Serial.println("Run...");
-
-}
-
-void loop(){
-  // Hoch
-  for (int p = START_PCT; p <= STOP_PCT; p += STEP_PCT){
-    writePercent(p);
-    uint32_t t0 = millis();
-    while (millis() - t0 < STEP_INTERVAL_MS){
-      float v = readPackVoltage();
-      drawUI(p, v);
-      delay(200);
-    }
-  }
-  // Runter
-  for (int p = STOP_PCT - STEP_PCT; p >= START_PCT; p -= STEP_PCT){
-    writePercent(p);
-    uint32_t t0 = millis();
-    while (millis() - t0 < STEP_INTERVAL_MS){
-      float v = readPackVoltage();
-      drawUI(p, v);
-      delay(200);
-    }
+  if(v > 7.5){
+    drawUI(0, v);
+    delay(ARMING_MS);
+    fanAllowed = true;
   }
 }
+
+void loop() {
+  // Akku-Spannung messen
+  float v = readPackVoltage();
+
+  if (v <= 7.5) {
+    writePercent(0);
+    fanAllowed = false;   // dauerhaft sperren
+    drawUI(0, v);
+    delay(100);
+  }
+
+  if (fanAllowed) {
+    // --- Normales Testprofil ---
+    // Hochfahren
+    for (int p = START_PCT; p <= STOP_PCT; p += STEP_PCT) {
+      uint32_t t0 = millis();
+      while (millis() - t0 < STEP_INTERVAL_MS) {
+        v = readPackVoltage();
+        drawUI(p, v);
+        delay(100);
+
+        if (v < 7.5) {
+          writePercent(0);
+          fanAllowed = false;
+          return; // sofort raus
+        }
+      }
+      writePercent(p);
+    }
+
+    // Runterfahren
+    for (int p = STOP_PCT - STEP_PCT; p >= START_PCT; p -= STEP_PCT) {
+      uint32_t t0 = millis();
+      while (millis() - t0 < STEP_INTERVAL_MS) {
+        v = readPackVoltage();
+        drawUI(p, v);
+        delay(100);
+
+        if (v < 7.5) {
+          writePercent(0);
+          fanAllowed = false;
+          return;
+        }
+      }
+      writePercent(p);
+    }
+  }
+}
+
