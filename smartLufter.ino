@@ -17,10 +17,10 @@ const int MAX_US = 2000;
 
 // ---------- Testprofil ----------
 const uint8_t  START_PCT = 10;
-const uint8_t  STOP_PCT  = 60;
+const uint8_t  STOP_PCT  = 80;
 const uint8_t  STEP_PCT  = 10;
-const uint32_t STEP_INTERVAL_MS = 5000;
-const uint32_t ARMING_MS = 3000;
+const uint32_t STEP_INTERVAL_MS = 3000;
+const uint32_t ARMING_MS = 5000;
 
 // ---------- INA226 ----------
 INA226 ina(0x40);  // 0x40 laut Scan
@@ -49,6 +49,20 @@ void writePercent(int pct){
 float readPackVoltage(){
   return ina.isConnected() ? ina.getBusVoltage() : NAN; // Volt
 }
+
+void drawFan(int cx, int cy, int r, int angleDeg) {
+  // Kreis außen
+  u8g2.drawCircle(cx, cy, r, U8G2_DRAW_ALL);
+
+  // 3 Flügel
+  for (int i = 0; i < 3; i++) {
+    float ang = (angleDeg + i*120) * PI / 180.0;
+    int x2 = cx + cos(ang) * (r-2);
+    int y2 = cy + sin(ang) * (r-2);
+    u8g2.drawLine(cx, cy, x2, y2);
+  }
+}
+
 
 // Splash-Screen
 void showSplash() {
@@ -105,11 +119,31 @@ void drawBatteryWithPct(int x, int y, int w, int h, int soc) {
 }
 
 
-// Hauptanzeige
 void drawUI(int pct, float v) {
   u8g2.clearBuffer();
 
-  // Großer Wert (Gas)
+  // --- Low Battery Alarm ---
+  if (!isnan(v) && v <= 7.6f) {
+    // Weißer Hintergrund dauerhaft
+    u8g2.setDrawColor(1);
+    u8g2.drawBox(0, 0, 128, 64);
+
+    // Text nur blinken lassen
+    if ((millis()/1000) % 2 == 0) {
+      u8g2.setDrawColor(0);  // schwarz
+      u8g2.setFont(u8g2_font_7x13_tf);  // gleiche wie normale Anzeige
+      const char *msg = "LOW BATTERY!";
+      uint16_t w = u8g2.getStrWidth(msg);
+      u8g2.drawStr((128 - w)/2, 36, msg);  // mittig setzen
+      u8g2.setDrawColor(1); // zurücksetzen
+    }
+
+    u8g2.sendBuffer();
+    return; // normale Anzeige überspringen
+  }
+
+  // --- Normale Anzeige ---
+  // Großer Gaswert
   char pctStr[8];
   snprintf(pctStr, sizeof(pctStr), "%d%%", pct);
   u8g2.setFont(u8g2_font_logisoso24_tf);
@@ -119,25 +153,21 @@ void drawUI(int pct, float v) {
   // Spannung links unten
   int soc = voltageToSOC3S(v);
   char line[16];
-  if (isnan(v)) snprintf(line, sizeof(line), "--.--V");
-  else          snprintf(line, sizeof(line), "%.2fV", v);
+  if (isnan(v)) snprintf(line, sizeof(line), "U=--.--V");
+  else          snprintf(line, sizeof(line), "U=%.2fV", v);
   u8g2.setFont(u8g2_font_7x13_tf);
   u8g2.drawStr(0, 63, line);
 
-  // Batterie rechts unten
+  // Batterie rechts unten mit Prozent
   drawBatteryWithPct(90, 50, 36, 14, soc);
 
-  // Low-Batt-Warnung
-  if (!isnan(v) && v <= 7.5f) {
-    if ((millis()/500) % 2 == 0) { // blinkt alle 0.5s
-      u8g2.setFont(u8g2_font_7x13B_tf);
-      u8g2.drawStr(20, 20, "LOW BAT!");
-    }
-  }
+  // Lüfter animiert oben rechts
+  static int fanAngle = 0;
+  fanAngle = (fanAngle + max(1, pct/5) * 2) % 360;
+  drawFan(115, 15, 10, fanAngle);
 
   u8g2.sendBuffer();
 }
-
 
 
 
