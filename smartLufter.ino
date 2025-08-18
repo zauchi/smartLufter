@@ -45,56 +45,99 @@ void writePercent(int pct){
   ledcWrite(ESC_PIN, usToDuty(percentToUs(pct))); // ESP32 Core v3: pin-basiert
 }
 
-// sehr grobe SoC-Schätzung (3S, Ruhespannung!)
-int voltageToSOC3S(float v){
-  struct P { float v; int soc; };
-  const P t[] = {{9.60f,0},{10.80f,10},{11.40f,30},{11.70f,50},{12.00f,70},{12.30f,90},{12.60f,100}};
-  if (v <= t[0].v) return 0;
-  if (v >= t[6].v) return 100;
-  for (int i=0;i<6;i++){
-    if (v < t[i+1].v){
-      float x = (v - t[i].v) / (t[i+1].v - t[i].v);
-      return (int)(t[i].soc + x * (t[i+1].soc - t[i].soc) + 0.5f);
-    }
-  }
-  return 0;
-}
 
 float readPackVoltage(){
   return ina.isConnected() ? ina.getBusVoltage() : NAN; // Volt
 }
 
-void drawUI(int pct, float v){
+// Splash-Screen
+void showSplash() {
+  u8g2.clearBuffer();
+  u8g2.setFont(u8g2_font_logisoso28_tf);
+  uint16_t w = u8g2.getStrWidth("smart");
+  u8g2.drawStr((128 - w)/2, 30, "smart");
+  w = u8g2.getStrWidth("Lufter");
+  u8g2.drawStr((128 - w)/2, 62, "Lufter");
+  u8g2.sendBuffer();
+  delay(2000);
+}
+
+// Neue SoC-Berechnung (linear 7.5–12.6 V)
+int voltageToSOC3S(float v) {
+  if (isnan(v)) return 0;
+  if (v <= 7.5f) return 0;
+  if (v >= 12.6f) return 100;
+  return (int)((v - 7.5f) * 100.0f / (12.6f - 7.5f) + 0.5f);
+}
+
+void drawBatteryWithPct(int x, int y, int w, int h, int soc) {
+  // Gehäuse
+  u8g2.drawFrame(x, y, w, h);
+
+  // Nase
+  int nubW = max(2, w/8);
+  u8g2.drawBox(x + w, y + (h/4), nubW, h/2);
+
+  // Füllung nach SoC
+  int innerW = w - 2;
+  int innerH = h - 2;
+  int fillW = (innerW * soc) / 100;
+  if (fillW > 0) {
+    u8g2.drawBox(x+1, y+1, fillW, innerH);
+  }
+
+  // Weiße Fläche für Text (über gesamte Batterie-Innenfläche)
+  u8g2.setDrawColor(1);
+  u8g2.drawBox(x+1, y+1, innerW, innerH);
+
+  // Schwarze Zahl oben drauf
+  char buf[6];
+  snprintf(buf, sizeof(buf), "%d%%", soc);
+  u8g2.setDrawColor(0);
+  u8g2.setFont(u8g2_font_5x8_tf);
+  uint16_t tw = u8g2.getStrWidth(buf);
+  int tx = x + (w - tw)/2;
+  int ty = y + h - 3;  // etwas höher, damit es mittig wirkt
+  u8g2.drawStr(tx, ty, buf);
+
+  // Zeichenfarbe zurücksetzen
+  u8g2.setDrawColor(1);
+}
+
+
+// Hauptanzeige
+void drawUI(int pct, float v) {
   u8g2.clearBuffer();
 
-  // Titel (gut lesbar, nicht zu klein)
-  u8g2.setFont(u8g2_font_7x13B_tf);       // 13 px hoch, fett
-  u8g2.drawStr(0,13, "ESC Test");
-
-  // GROSSER Prozentwert mittig
+  // Großer Wert (Gas)
   char pctStr[8];
   snprintf(pctStr, sizeof(pctStr), "%d%%", pct);
-  u8g2.setFont(u8g2_font_logisoso24_tf);  // ~24 px hoch
+  u8g2.setFont(u8g2_font_logisoso24_tf);
   uint16_t w = u8g2.getStrWidth(pctStr);
-  int x = (128 - w) / 2;
-  u8g2.drawStr(x, 38, pctStr);            // Baseline bei y=38 passt sicher
+  u8g2.drawStr((128 - w)/2, 38, pctStr);
 
-  // Infozeile: Spannung + SoC
-  int soc = isnan(v) ? 0 : voltageToSOC3S(v);
-  char line[32];
-  if (isnan(v)) snprintf(line, sizeof(line), "U=--.--V   SoC~%d%%", soc);
-  else          snprintf(line, sizeof(line), "U=%.2fV   SoC~%d%%", v, soc);
-  u8g2.setFont(u8g2_font_7x13_tf);        // etwas größer als 6x10
-  u8g2.drawStr(0, 53, line);
+  // Spannung links unten
+  int soc = voltageToSOC3S(v);
+  char line[16];
+  if (isnan(v)) snprintf(line, sizeof(line), "--.--V");
+  else          snprintf(line, sizeof(line), "%.2fV", v);
+  u8g2.setFont(u8g2_font_7x13_tf);
+  u8g2.drawStr(0, 63, line);
 
-  // SoC-Balken unten
-  const int barX=0, barY=56, barW=128, barH=8;
-  u8g2.drawFrame(barX, barY, barW, barH);
-  int fillW = (barW-2) * soc / 100;
-  if (fillW > 0) u8g2.drawBox(barX+1, barY+1, fillW, barH-2);
+  // Batterie rechts unten
+  drawBatteryWithPct(90, 50, 36, 14, soc);
+
+  // Low-Batt-Warnung
+  if (!isnan(v) && v <= 7.5f) {
+    if ((millis()/500) % 2 == 0) { // blinkt alle 0.5s
+      u8g2.setFont(u8g2_font_7x13B_tf);
+      u8g2.drawStr(20, 20, "LOW BAT!");
+    }
+  }
 
   u8g2.sendBuffer();
 }
+
 
 
 
@@ -113,6 +156,7 @@ void setup(){
   u8g2.setContrast(160);     // 0..255, 150–190 meist gut
   u8g2.setFlipMode(0);       // bei Bedarf 1
 
+  showSplash();
 
   // INA226
   if (!ina.begin()){
