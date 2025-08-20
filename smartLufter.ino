@@ -238,7 +238,7 @@ void setup() {
 // ----------------- LOOP ----------------- //
 void loop() {
   // --- Battery check --- //
-  float v = readPackVoltage();
+  float v = readPackVoltage()-0.64;
   if (!isnan(v) && v <= LOW_VOLTAGE_V) {
     outUs = MIN_US;
     writeUs(outUs);
