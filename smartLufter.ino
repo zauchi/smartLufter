@@ -10,6 +10,7 @@ const uint8_t I2C_SCL_PIN = 19;   // <- bestätigt
 const uint8_t ESC_PIN       = 22; // weg von I2C-Pins
 const uint32_t PWM_FREQ_HZ  = 50;
 const uint8_t  PWM_RES_BITS = 16;
+const int POT_PIN = 34;  // ADC1_6, sicherer ADC-Pin
 
 // ---------- ESC-Endpunkte ----------
 const int MIN_US = 1000;
@@ -203,6 +204,10 @@ void setup(){
     delay(ARMING_MS);
     fanAllowed = true;
   }
+
+  analogReadResolution(12);    // 0–4095
+  analogSetAttenuation(ADC_11db); // Bereich bis ca. 3.3V
+
 }
 
 void loop() {
@@ -216,41 +221,15 @@ void loop() {
     delay(100);
   }
 
+  int raw = analogRead(POT_PIN);   // 0–4095
+  int pct = map(raw, 0, 4095, 0, 100);  // 0–100%
+
   if (fanAllowed) {
-    // --- Normales Testprofil ---
-    // Hochfahren
-    for (int p = START_PCT; p <= STOP_PCT; p += STEP_PCT) {
-      uint32_t t0 = millis();
-      while (millis() - t0 < STEP_INTERVAL_MS) {
-        v = readPackVoltage();
-        drawUI(p, v);
-        delay(100);
-
-        if (v < 7.5) {
-          writePercent(0);
-          fanAllowed = false;
-          return; // sofort raus
-        }
-      }
-      writePercent(p);
-    }
-
-    // Runterfahren
-    for (int p = STOP_PCT - STEP_PCT; p >= START_PCT; p -= STEP_PCT) {
-      uint32_t t0 = millis();
-      while (millis() - t0 < STEP_INTERVAL_MS) {
-        v = readPackVoltage();
-        drawUI(p, v);
-        delay(100);
-
-        if (v < 7.5) {
-          writePercent(0);
-          fanAllowed = false;
-          return;
-        }
-      }
-      writePercent(p);
-    }
+    writePercent(pct);
+    float v = readPackVoltage();
+    drawUI(pct, v);
+    delay(100);
   }
+
 }
 
