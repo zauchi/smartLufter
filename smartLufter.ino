@@ -22,24 +22,28 @@ bool fanAllowed = false;
 
 // -------- Poti-Kalibrierung --------
 const int POT_RAW_MIN = 0;     // gemessen
-const int POT_RAW_MAX = 3312;  // dein 100%-Wert
+const int POT_RAW_MAX = 3310;  // dein 100%-Wert
 
 // ---- Sanfte Regelung ----
 const uint32_t UPDATE_INTERVAL_MS = 15;  // häufiger updaten
-const float    INPUT_ALPHA        = 0.25f; // Poti-Glättung (0..1, größer = schneller)
-const float    RAMP_PCT_PER_SEC   = 80.0f; // max. %/Sekunde Änderung am ESC
+const float    INPUT_ALPHA        = 0.2f; // Poti-Glättung (0..1, größer = schneller)
+const float    RAMP_PCT_PER_SEC   = 10.0f; // max. %/Sekunde Änderung am ESC
 
 float potFiltPct = 0.0f;      // gefilterter Potiwert [%]
 float outPct     = 0.0f;      // tatsächlich ausgegebener Wert [%]
 uint32_t lastUpdateMs = 0;
+float outUs      = (float)MIN_US; // [µs] tatsächlich ausgegebener Puls
+
+// zusätzlich: Rampe in µs
+const float RAMP_US_PER_SEC = (MAX_US - MIN_US) * (RAMP_PCT_PER_SEC / 100.0f);
 
 inline int pctFromRaw(int raw) {
   raw = constrain(raw, POT_RAW_MIN, POT_RAW_MAX);
   return (int) lroundf((raw - POT_RAW_MIN) * 100.0f / (POT_RAW_MAX - POT_RAW_MIN));
 }
 
-// -------- INA226 (I2C @0x40) --------
-INA226 ina(0x40);
+// -------- INA226 (I2C @0x44) --------
+INA226 ina(0x44);
 
 // -------- Display SH1106 --------
 U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
@@ -48,23 +52,34 @@ U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
 const float PERIOD_US = 1e6f / PWM_FREQ_HZ;
 const uint32_t DUTY_MAX = (1u << PWM_RES_BITS) - 1u;
 
-// Begrenzt die Änderung von "current" in Richtung "target" gemäß maxDelta
-static inline float slewTowards(float current, float target, float maxDelta) {
-  if (target > current + maxDelta) return current + maxDelta;
-  if (target < current - maxDelta) return current - maxDelta;
+// Begrenzt die Änderung von current->target auf maxDelta (in µs)
+static inline float slewTowardsUs(float current, float target, float maxDeltaUs) {
+  if (target > current + maxDeltaUs) return current + maxDeltaUs;
+  if (target < current - maxDeltaUs) return current - maxDeltaUs;
   return target;
 }
 
-uint32_t usToDuty(int us){
+uint32_t usToDuty(float us){
   float d = (us / PERIOD_US) * DUTY_MAX;
   if (d < 0) d = 0; if (d > DUTY_MAX) d = DUTY_MAX;
   return (uint32_t)(d + 0.5f);
+}
+
+// ESC direkt in µs schreiben (kein Prozent-Runden)
+void writeUs(float us){
+  us = constrain(us, (float)MIN_US, (float)MAX_US);
+  ledcWrite(ESC_PIN, usToDuty(us));
 }
 
 void writePercent(int pct){
   pct = constrain(pct, 0, 100);
   int us = MIN_US + (int)((MAX_US - MIN_US) * (pct / 100.0f));
   ledcWrite(ESC_PIN, usToDuty(us));
+}
+
+inline float pctToUs(float pct){
+  pct = constrain(pct, 0.0f, 100.0f);
+  return MIN_US + (MAX_US - MIN_US) * (pct / 100.0f);
 }
 
 float readPackVoltage(){
@@ -111,22 +126,24 @@ void drawFan(int cx, int cy, int r, int angleDeg) {
 void drawUI(int pct, float v) {
   u8g2.clearBuffer();
 
+  // --- Low Battery Alarm ---
   if (!isnan(v) && v <= LOW_VOLTAGE_V) {
     writePercent(0);
     fanAllowed = false;
 
-    // Weißer Hintergrund
+    // Hintergrund dauerhaft weiß
     u8g2.setDrawColor(1);
     u8g2.drawBox(0,0,128,64);
 
-    // Nur Text blinkt
-    bool vis = (millis()/500)%2==0;
-    u8g2.setFont(u8g2_font_7x13_tf);
-    const char* msg = "LOW BATTERY!";
-    int w = u8g2.getStrWidth(msg);
-    u8g2.setDrawColor(vis ? 0 : 1);
-    u8g2.drawStr((128 - w)/2, 36, msg);
-    u8g2.setDrawColor(1);
+    // Text blinkt (ein/aus)
+    bool vis = (millis()/500) % 2 == 0;
+    if (vis) {
+      u8g2.setFont(u8g2_font_7x13_tf);
+      const char* msg = "LOW BATTERY!";
+      int w = u8g2.getStrWidth(msg);
+      u8g2.setDrawColor(0);  // Schwarz
+      u8g2.drawStr((128 - w)/2, 36, msg);
+    }
 
     u8g2.sendBuffer();
     return;
@@ -150,8 +167,11 @@ void drawUI(int pct, float v) {
 
   // Lüfter oben rechts (Speed ∝ Gas, doppelt)
   static int fanAngle = 0;
-  fanAngle = (fanAngle + max(1, pct/5) * 2) % 360;
+  if (pct > 0) {
+    fanAngle = (fanAngle + (pct/5) * 2) % 360;  // keine Mindestdrehung mehr
+  }
   drawFan(115, 15, 10, fanAngle);
+
 
   u8g2.sendBuffer();
 }
@@ -176,6 +196,7 @@ void setup() {
 
   // I2C
   Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+  scanI2C();
 
   // Display
   u8g2.setI2CAddress(0x3C*2);
@@ -202,8 +223,9 @@ void setup() {
     while(true) delay(1000);
   }
 
-  // Arming
-  writePercent(0);
+  outUs = MIN_US;
+  writeUs(outUs);
+
   fanAllowed = true;
 }
 
@@ -212,38 +234,44 @@ void loop() {
   // Akku prüfen
   float v = readPackVoltage();
   if (!isnan(v) && v <= LOW_VOLTAGE_V) {
-    writePercent(0);
+    outUs = MIN_US;
+    writeUs(outUs);
     fanAllowed = false;
     drawUI(0, v);
-    delay(100); // kurze Pause, aber nicht blockieren
+    delay(100);
     return;
   }
 
-  // Zeitsteuerung für sanfte Updates
+  // Zeitgesteuertes Update
   uint32_t now = millis();
   uint32_t dt  = now - lastUpdateMs;
   if (dt < UPDATE_INTERVAL_MS) {
-    // zu früh -> nur UI refreshen (optional)
-    drawUI(fanAllowed ? (int)lroundf(outPct) : 0, v);
+    int dispPct = (int)lroundf( (outUs - MIN_US) * 100.0f / (MAX_US - MIN_US) );
+    drawUI(fanAllowed ? dispPct : 0, v);
     return;
   }
   lastUpdateMs = now;
 
-  // --- Poti lesen & glätten ---
+  // Poti lesen & glätten (weiterhin in %)
   int raw = analogRead(POT_PIN);
-  int pct = pctFromRaw(raw);           // 0..100 (kalibriert)
-  // Exponentielle Glättung des Eingangs
+  int pct = pctFromRaw(raw);                 // 0..100 (int aus Kalibrierung)
   potFiltPct = INPUT_ALPHA * pct + (1.0f - INPUT_ALPHA) * potFiltPct;
 
-  // --- Ausgabe sanft rampen ---
-  float maxDelta = (RAMP_PCT_PER_SEC * dt) / 1000.0f;  // erlaubter Schritt in %
-  float targetOut = fanAllowed ? potFiltPct : 0.0f;
-  outPct = slewTowards(outPct, targetOut, maxDelta);
+  // Ziel in µs
+  float targetUs = fanAllowed ? pctToUs(potFiltPct) : (float)MIN_US;
 
-  // --- ESC ansteuern ---
-  writePercent((int)lroundf(outPct));
+  // erlaubter Schritt (in µs) aus dt
+  float maxDeltaUs = RAMP_US_PER_SEC * (dt / 1000.0f);
 
-  // --- UI ---
-  drawUI((int)lroundf(outPct), v);
+  // sanft auf Ziel rampen (in µs)
+  outUs = slewTowardsUs(outUs, targetUs, maxDeltaUs);
+
+  // zum ESC ausgeben (feinauflösend)
+  writeUs(outUs);
+
+  // Anzeige
+  int dispPct = (int)lroundf( (outUs - MIN_US) * 100.0f / (MAX_US - MIN_US) );
+  drawUI(dispPct, v);
 }
+
 
